@@ -49,6 +49,7 @@ def build_market(businesses: list[Business], all_facts: dict[int, SiteFacts], v:
     ctx = MarketContext(city=city, median_reviews=statistics.median(counts) if counts else None)
     # For each check, name the most-reviewed competitor that gets it right: concrete social proof for the pitch.
     by_reviews = sorted(businesses, key=lambda b: b.review_count or 0, reverse=True)
+    ctx.leaders_by_reviews = any(b.review_count for b in businesses)
     checks = {
         "no_quote_form": lambda f: f.any_form,
         "weak_cta": lambda f: has_cta(f, v),
@@ -72,7 +73,10 @@ def detect(b: Business, facts: SiteFacts | None, v: Vertical, ctx: MarketContext
         leader = ctx.leaders.get(code)
         if not leader or leader == b.name:
             return ""
-        return f" {leader}, one of the most-reviewed competitors in {ctx.city or 'your market'}, does."
+        where = ctx.city or "your market"
+        if ctx.leaders_by_reviews:
+            return f" {leader}, one of the most-reviewed competitors in {where}, does."
+        return f" {leader}, a competitor in {where}, does."
 
     # --- No site / broken site: the biggest leak of all.
     if not b.website:

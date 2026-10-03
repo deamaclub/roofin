@@ -64,3 +64,4 @@ class MarketContext:
     city: str | None
     median_reviews: float | None = None
     leaders: dict[str, str] = field(default_factory=dict)  # finding code -> competitor that gets it right
+    leaders_by_reviews: bool = False  # True only when review counts were known, so "most-reviewed" is true

@@ -117,3 +117,14 @@ def test_parse_place():
         "reviews": [{"rating": 5, "text": {"text": "Great"}, "publishTime": "2026-01-01T00:00:00Z"}],
     })
     assert b.name == "X Roofing" and b.review_count == 9 and b.reviews[0].text == "Great"
+
+
+def test_competitor_wording_without_review_counts(weak_session, strong_session):
+    """Free OpenStreetMap data has no review counts, so we must not claim "most-reviewed"."""
+    weak, strong = weak_business(), strong_business()
+    weak.review_count = strong.review_count = None
+    facts = {1: audit(weak, weak_session), 2: audit(strong, strong_session)}
+    ctx = build_market([weak, strong], facts, ROOFING, "Rochester")
+    form = next(f for f in detect(weak, facts[1], ROOFING, ctx, TODAY) if f.code == "no_quote_form")
+    assert "Summit Roofing, a competitor in Rochester, does." in form.evidence
+    assert "most-reviewed" not in form.evidence
