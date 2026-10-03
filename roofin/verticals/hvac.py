@@ -7,6 +7,8 @@ VERTICAL = Vertical(
     cta_phrases=("schedule service", "book service", "free estimate", "free quote", "request service",
                  "get a quote", "book online", "schedule online"),
     default_cta="Schedule Service",
+    osm_tags=(("craft", "hvac"),),
+    osm_name_words=("hvac", "heating", "air conditioning", "furnace"),
     hero_sample=(
         "## Heating & Cooling Service in {city}\n"
         "No heat, no AC, or a system that just isn't keeping up — {name} diagnoses it fast and gives you an "

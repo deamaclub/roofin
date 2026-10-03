@@ -1,6 +1,7 @@
 """roofin: find money -> create proof -> ask for money.
 
-    roofin run "Rochester NY"            # discover + audit + draft, all in one
+    roofin run "Rochester NY"            # discover (free OpenStreetMap) + audit + draft
+    roofin add "ABC Roofing" --market "Rochester NY" --website abcroofing.com   # add one by hand
     roofin prospects                     # ranked list
     roofin outreach                      # drafts waiting for your approval
     roofin mark 3 sent                   # after you send it yourself
@@ -19,9 +20,9 @@ from pathlib import Path
 from . import db, verticals
 from .crawl import fetch_site
 from .detect import build_market, detect, score
-from .discovery import DiscoveryError, load_csv, search_places
+from .discovery import DiscoveryError, load_csv, search_osm, search_places
 from .facts import SiteFacts, extract
-from .models import Business
+from .models import Business, Review
 from .outreach import Sender, draft_email, money
 from .report import html_page, markdown, slug
 
@@ -49,10 +50,17 @@ def cents(amount: str) -> int:
 
 def cmd_discover(args, conn) -> None:
     v = verticals.get(args.vertical)
-    query = args.query or f"{v.search_suffix} in {args.market}"
-    print(f"Searching Google Places: {query!r} (limit {args.limit})")
+    source = args.source
+    if source == "auto":
+        source = "google" if os.environ.get("GOOGLE_PLACES_API_KEY") else "osm"
     try:
-        found = search_places(query, limit=args.limit)
+        if source == "google":
+            query = args.query or f"{v.search_suffix} in {args.market}"
+            print(f"Searching Google Places (paid API): {query!r} (limit {args.limit})")
+            found = search_places(query, limit=args.limit)
+        else:
+            print(f"Searching OpenStreetMap (free) for {v.key} businesses in {args.market!r}")
+            found = search_osm(args.market, v.osm_tags, v.osm_name_words, limit=args.limit)
     except DiscoveryError as exc:
         sys.exit(f"error: {exc}")
     for b in found:
@@ -60,6 +68,21 @@ def cmd_discover(args, conn) -> None:
     conn.commit()
     with_site = sum(1 for b in found if b.website)
     print(f"Stored {len(found)} businesses ({with_site} with websites).")
+    if source == "osm":
+        print("OpenStreetMap misses many businesses and has no reviews. Add more for free with `roofin add` "
+              "while browsing Google Maps.")
+
+
+def cmd_add(args, conn) -> None:
+    v = verticals.get(args.vertical)
+    b = Business(
+        name=args.name, website=args.website, phone=args.phone, address=args.address,
+        rating=args.rating, review_count=args.reviews,
+        reviews=[Review(rating=None, text=t) for t in args.review or []],
+    )
+    bid = db.upsert_business(conn, b, v.key, args.market)
+    conn.commit()
+    print(f"Saved #{bid} {b.name} in {args.market!r}.")
 
 
 def cmd_import(args, conn) -> None:
@@ -276,16 +299,33 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--min-score", type=float, default=30)
         sp.add_argument("--offer", default="25", help="price of the fix in dollars (default 25)")
         sp.add_argument("--out", default="out", help="where reports are written")
-        sp.add_argument("--llm", action="store_true", help="polish copy with Claude (needs anthropic credentials)")
+        sp.add_argument("--llm", action="store_true", help="polish copy with Claude (PAID API; the default template copy is free)")
         sp.add_argument("--sender-name", default=os.environ.get("ROOFIN_SENDER_NAME"))
         sp.add_argument("--sender-email", default=os.environ.get("ROOFIN_SENDER_EMAIL"))
         sp.add_argument("--sender-address", default=os.environ.get("ROOFIN_SENDER_ADDRESS"))
 
-    sp = sub.add_parser("discover", help="find businesses with Google Places")
+    def discover_opts(sp):
+        sp.add_argument("--source", choices=("auto", "osm", "google"), default="auto",
+                        help="osm = free OpenStreetMap; google = paid Places API; "
+                             "auto = google only if GOOGLE_PLACES_API_KEY is set (default)")
+        sp.add_argument("--limit", type=int, default=60, help="max results (Google caps a query at 60)")
+        sp.add_argument("--query", help="override the Google search text")
+
+    sp = sub.add_parser("discover", help="find businesses (free OpenStreetMap by default)")
     sp.add_argument("market", help='e.g. "Rochester NY"')
-    sp.add_argument("--limit", type=int, default=60, help="max results (Places caps a query at 60)")
-    sp.add_argument("--query", help="override the search text")
+    discover_opts(sp)
     sp.set_defaults(fn=cmd_discover)
+
+    sp = sub.add_parser("add", help="add one business by hand (e.g. copied from Google Maps), free")
+    sp.add_argument("name")
+    sp.add_argument("--market", required=True, help='e.g. "Rochester NY"')
+    sp.add_argument("--website")
+    sp.add_argument("--phone")
+    sp.add_argument("--address")
+    sp.add_argument("--rating", type=float, help="Google star rating, e.g. 4.6")
+    sp.add_argument("--reviews", type=int, help="number of Google reviews")
+    sp.add_argument("--review", action="append", help="paste a review's text; repeat for several")
+    sp.set_defaults(fn=cmd_add)
 
     sp = sub.add_parser("import", help="load businesses from a CSV instead of Google")
     sp.add_argument("csv")
@@ -329,8 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("run", help="discover + audit + draft for a market")
     sp.add_argument("market")
-    sp.add_argument("--limit", type=int, default=60)
-    sp.add_argument("--query")
+    discover_opts(sp)
     audit_opts(sp)
     draft_opts(sp)
     sp.set_defaults(fn=cmd_run)

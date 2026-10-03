@@ -1,4 +1,4 @@
-"""Find businesses to audit: Google Places API (read-only research) or a CSV you already have."""
+"""Find businesses to audit: OpenStreetMap (free), Google Places API (paid, read-only), or a CSV you made."""
 from __future__ import annotations
 
 import csv
@@ -95,3 +95,64 @@ def load_csv(path: str) -> list[Business]:
                 reviews=reviews,
             ))
     return out
+
+
+# ---------------------------------------------------------------- OpenStreetMap (free, no key, no account)
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OSM_USER_AGENT = "roofin/0.1 (local business website audit; low volume)"
+
+
+def _osm_regex(words: tuple[str, ...]) -> str:
+    return "|".join(w.replace('"', "").replace("\\", "") for w in words)
+
+
+def overpass_query(bbox: tuple[float, float, float, float], tags: tuple[tuple[str, str], ...],
+                   name_words: tuple[str, ...]) -> str:
+    s, w, n, e = bbox
+    box = f"({s},{w},{n},{e})"
+    parts = [f'nwr["{k}"="{v}"]{box};' for k, v in tags]
+    if name_words:
+        # Named things that aren't roads/places: businesses whose name contains the trade word.
+        parts.append(f'nwr["name"~"{_osm_regex(name_words)}",i][!"highway"][!"place"]{box};')
+    return "[out:json][timeout:60];(" + "".join(parts) + ");out center tags;"
+
+
+def search_osm(market: str, tags: tuple[tuple[str, str], ...], name_words: tuple[str, ...], limit: int = 100,
+               session: requests.Session | None = None) -> list[Business]:
+    """Free discovery from OpenStreetMap. Coverage is thinner than Google and there are no reviews."""
+    http = session or requests.Session()
+    headers = {"User-Agent": OSM_USER_AGENT}
+    geo = http.get(NOMINATIM_URL, params={"q": market, "format": "json", "limit": 1}, headers=headers, timeout=30)
+    if geo.status_code != 200 or not geo.json():
+        raise DiscoveryError(f"couldn't find {market!r} on OpenStreetMap (HTTP {geo.status_code})")
+    south, north, west, east = (float(x) for x in geo.json()[0]["boundingbox"])
+    query = overpass_query((south, west, north, east), tags, name_words)
+    resp = http.post(OVERPASS_URL, data={"data": query}, headers=headers, timeout=90)
+    if resp.status_code != 200:
+        raise DiscoveryError(f"Overpass API {resp.status_code}: {resp.text[:300]} (it's a shared free service; retry in a minute)")
+    seen: set[str] = set()
+    out: list[Business] = []
+    for el in resp.json().get("elements", []):
+        b = parse_osm(el)
+        if b and b.name.lower() not in seen:
+            seen.add(b.name.lower())
+            out.append(b)
+    return out[:limit]
+
+
+def parse_osm(el: dict) -> Business | None:
+    t = el.get("tags", {})
+    name = t.get("name")
+    if not name:
+        return None
+    street = " ".join(filter(None, [t.get("addr:housenumber"), t.get("addr:street")]))
+    address = ", ".join(filter(None, [street, t.get("addr:city"), t.get("addr:state"), t.get("addr:postcode")]))
+    return Business(
+        name=name,
+        place_id=f"osm:{el.get('type')}/{el.get('id')}",
+        address=address or None,
+        phone=t.get("phone") or t.get("contact:phone"),
+        website=t.get("website") or t.get("contact:website") or t.get("url"),
+    )

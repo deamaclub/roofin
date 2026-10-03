@@ -25,6 +25,9 @@ class Vertical:
     default_cta: str  # the CTA we recommend
     hero_sample: str  # copy for businesses with no website or no clear CTA
     topics: tuple[Topic, ...] = field(default_factory=tuple)
+    # Free OpenStreetMap discovery: exact tags (key, value) and words that appear in business names.
+    osm_tags: tuple[tuple[str, str], ...] = ()
+    osm_name_words: tuple[str, ...] = ()
 
 
 def _packs() -> dict[str, Vertical]:

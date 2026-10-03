@@ -7,6 +7,8 @@ VERTICAL = Vertical(
     cta_phrases=("free estimate", "free inspection", "free quote", "free roof inspection", "get a quote",
                  "request a quote", "get an estimate", "schedule an inspection", "book an inspection"),
     default_cta="Get a Free Roof Inspection",
+    osm_tags=(("craft", "roofer"),),
+    osm_name_words=("roof",),
     hero_sample=(
         "## {city} Roof Repair & Replacement You Can Count On\n"
         "Leaks, storm damage, or a roof that's simply worn out — {name} inspects it for free and gives you "

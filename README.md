@@ -37,34 +37,53 @@ proof that gets the reply.
 Every business gets a **prospect score** (0–100): severity of the problems × whether it's a real, active,
 reachable business with customers. Closed businesses score 0. Clean sites score low and are never pitched.
 
-## Setup
+## Setup ($0)
 
 ```bash
-pip install -e .            # add [llm] for optional Claude copywriting, [dev] for tests
-export GOOGLE_PLACES_API_KEY=...          # Places API (New) enabled
+pip install -e .            # add [dev] for tests
 export ROOFIN_SENDER_NAME="Your Name"
-export ROOFIN_SENDER_EMAIL="you@yourdomain.com"
+export ROOFIN_SENDER_EMAIL="you@gmail.com"
 export ROOFIN_SENDER_ADDRESS="Your real postal address"   # legally required in US commercial email
 ```
 
-No Google key? Build a CSV by hand from Google Maps (`name,website,phone,rating,review_count,reviews`,
-multiple reviews separated by ` || `) and use `roofin import`.
+That's it. Everything below is free by default:
 
-> Cost note: requesting `reviews` from Places puts the call in a higher pricing tier. A 60-business
-> search is a few API calls; check current Google pricing for your account.
+| Step | Free way (default) | Paid option (never needed) |
+|---|---|---|
+| Find businesses | OpenStreetMap (`roofin discover`), plus `roofin add` / CSV for ones you see on Google Maps | Google Places API (`--source google`, needs a billing account) |
+| Audit websites | Your own computer visits the sites | — |
+| Report + email copy | Built-in templates | `--llm` uses the Claude API |
+| Sending | Your own Gmail/Outlook, by hand | — |
+
+**OpenStreetMap is thinner than Google** and has no reviews. To fill the gaps for free, open Google Maps in your
+browser, search "roofers near Rochester NY", and add the ones you see:
+
+```bash
+roofin add "ABC Roofing" --market "Rochester NY" --website abcroofing.com --phone "585-555-0101" \
+    --rating 4.7 --reviews 12 --review "After the storm they tarped our roof same day"
+```
+
+Pasting 2–3 reviews lets roofin spot "your reviews mention storm damage but your site has no storm page".
+Or put many in a CSV (`name,website,phone,address,rating,review_count,reviews`, reviews separated by ` || `)
+and `roofin import leads.csv --market "Rochester NY"`.
+
+> Google Places (`--source google`) requires a Google Cloud billing account. A Maps "Demo Key" is free but is
+> not expected to work for the Places text search this uses; if you try one, it fails with an error rather
+> than charging you.
 
 ## Use
 
 ```bash
-roofin run "Rochester NY"              # discover (≤60 per query) + audit + draft top 10
+roofin run "Rochester NY"              # discover (free OpenStreetMap) + audit + draft top 10
 # or step by step:
 roofin discover "Rochester NY"
-roofin discover "Rochester NY" --query "roof repair in Greece NY"   # widen the net; dedupes by place id
+roofin discover "Monroe County NY"     # a bigger area catches the suburbs
+roofin add "ABC Roofing" --market "Rochester NY" --website abcroofing.com
 roofin import leads.csv --market "Rochester NY"
 roofin audit
 roofin prospects                       # ranked, with each one's top 3 problems
 roofin draft --top 10 --offer 25       # writes out/NNNN-name.md (internal) + .html (client-facing)
-roofin draft --llm                     # same, copy polished by Claude; facts stay from the detectors
+roofin draft --llm                     # optional, PAID: copy polished by the Claude API
 
 roofin outreach                        # list drafts
 roofin outreach --show 3               # read one
@@ -116,7 +135,7 @@ removal, concrete, pressure washing, auto detailing — same engine, new word li
 
 ```
 roofin/
-  discovery.py   Google Places text search / CSV import
+  discovery.py   OpenStreetMap (free) / Google Places (paid) / CSV import
   crawl.py       polite shallow crawl (robots.txt, priority links)
   facts.py       HTML → facts (forms, tel links, CTAs, emails, viewport, nav…)
   detect.py      findings, competitor leaders, prospect score
