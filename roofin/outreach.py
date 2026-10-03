@@ -34,13 +34,13 @@ def first_name_greeting(b: Business) -> str:
 
 
 def draft_email(b: Business, findings: list[Finding], v: Vertical, offer_cents: int, sender: Sender,
-                report_url: str | None = None) -> Draft:
+                report_url: str | None = None, pay_link: str | None = None) -> Draft:
     top = pick_top(findings)
     n = len(top)
     subject = f"{n} thing{'s' if n != 1 else ''} that may be costing {b.name} leads"
     lines = [first_name_greeting(b), ""]
     lines.append(
-        f"I was looking at {v.trade}s in your area and went through your website and Google listing the way "
+        f"I was looking at {v.trade}s in your area and went through your website and online listing the way "
         f"a homeowner would. I found {n} thing{'s' if n != 1 else ''} that are probably costing you calls:"
     )
     lines.append("")
@@ -62,13 +62,36 @@ def draft_email(b: Business, findings: list[Finding], v: Vertical, offer_cents: 
         "you don't pay.",
         "",
         "Just reply \"yes\" and tell me which one.",
+    ]
+    if pay_link:
+        lines += ["", f"Once it's done and you're happy, you can pay here: {pay_link}"]
+    lines += [
         "",
         sender.name,
         sender.email,
         "",
         "—",
         f"{sender.name} · {sender.postal_address}",
-        "You're receiving this one-time note because your business is publicly listed. "
+        "You're receiving this because your business is publicly listed. "
         "Reply \"stop\" and I won't contact you again.",
     ]
     return Draft(subject=subject, body="\n".join(lines))
+
+
+def followup_email(b: Business, original_subject: str, offer_cents: int, sender: Sender) -> Draft:
+    """One short nudge in the same thread. Never more than one."""
+    body = "\n".join([
+        first_name_greeting(b),
+        "",
+        f"Just bumping this in case it got buried. The offer stands: I'll fix one of the issues for "
+        f"{money(offer_cents)}, and you only pay if you like the result.",
+        "",
+        "If it's not for you, no problem; reply \"stop\" and you won't hear from me again.",
+        "",
+        sender.name,
+        "",
+        "—",
+        f"{sender.name} · {sender.postal_address}",
+    ])
+    subject = original_subject if original_subject.lower().startswith("re:") else f"Re: {original_subject}"
+    return Draft(subject=subject, body=body)

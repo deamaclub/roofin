@@ -66,10 +66,42 @@ CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY,
     outreach_id INTEGER NOT NULL REFERENCES outreach(id),
     amount_cents INTEGER NOT NULL,
+    fee_cents INTEGER NOT NULL DEFAULT 0,
     note TEXT,
     received_at TEXT NOT NULL
 );
+
+-- Addresses and domains that asked not to be contacted. Checked before every send, forever.
+CREATE TABLE IF NOT EXISTS suppressions (
+    value TEXT PRIMARY KEY,  -- an email address or a bare domain
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+-- Money spent. Only ever paid out of revenue already received.
+CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    spent_at TEXT NOT NULL
+);
+
+-- Calls to metered free tiers (SerpApi), so we stop before the monthly allowance runs out.
+CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL,
+    month TEXT NOT NULL,  -- YYYY-MM
+    calls INTEGER NOT NULL,
+    UNIQUE (provider, month)
+);
 """
+
+# Columns added after the first release; applied to existing databases on connect.
+MIGRATIONS = {
+    "businesses": {"data_id": "TEXT"},
+    "outreach": {"message_id": "TEXT", "sent_at": "TEXT", "followup_at": "TEXT", "reply_snippet": "TEXT"},
+    "payments": {"fee_cents": "INTEGER NOT NULL DEFAULT 0"},
+}
 
 OUTREACH_STATUSES = ("draft", "approved", "sent", "replied", "won", "paid", "lost", "opted_out")
 
@@ -83,10 +115,53 @@ def connect(path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    for table, cols in MIGRATIONS.items():
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, decl in cols.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    conn.commit()
     return conn
 
 
-def upsert_business(conn: sqlite3.Connection, b: Business, vertical: str, market: str | None) -> int:
+def suppressed(conn: sqlite3.Connection, email: str) -> bool:
+    email = email.lower().strip()
+    domain = email.rsplit("@", 1)[-1]
+    return conn.execute("SELECT 1 FROM suppressions WHERE value IN (?, ?)", (email, domain)).fetchone() is not None
+
+
+def suppress(conn: sqlite3.Connection, value: str, reason: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO suppressions (value, reason, created_at) VALUES (?,?,?)",
+                 (value.lower().strip(), reason, now()))
+
+
+def month() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def api_calls(conn: sqlite3.Connection, provider: str) -> int:
+    row = conn.execute("SELECT calls FROM api_usage WHERE provider = ? AND month = ?", (provider, month())).fetchone()
+    return row["calls"] if row else 0
+
+
+def count_api_call(conn: sqlite3.Connection, provider: str) -> None:
+    conn.execute(
+        """INSERT INTO api_usage (provider, month, calls) VALUES (?, ?, 1)
+           ON CONFLICT (provider, month) DO UPDATE SET calls = calls + 1""", (provider, month()))
+    conn.commit()
+
+
+def money_summary(conn: sqlite3.Connection) -> dict[str, int]:
+    """All in cents. `available` is what may be spent: profit already received, minus what's been spent."""
+    gross = conn.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payments").fetchone()[0]
+    fees = conn.execute("SELECT COALESCE(SUM(fee_cents),0) FROM payments").fetchone()[0]
+    spent = conn.execute("SELECT COALESCE(SUM(amount_cents),0) FROM expenses").fetchone()[0]
+    return {"gross": gross, "fees": fees, "spent": spent, "net": gross - fees - spent,
+            "available": gross - fees - spent}
+
+
+def upsert_business(conn: sqlite3.Connection, b: Business, vertical: str, market: str | None,
+                    data_id: str | None = None) -> int:
     reviews = json.dumps([r.__dict__ for r in b.reviews])
     existing = None
     if b.place_id:
@@ -102,6 +177,8 @@ def upsert_business(conn: sqlite3.Connection, b: Business, vertical: str, market
             (b.name, b.address, b.phone, b.website, b.rating, b.review_count, b.maps_url, b.status, reviews,
              existing["id"]),
         )
+        if data_id:
+            conn.execute("UPDATE businesses SET data_id = ? WHERE id = ?", (data_id, existing["id"]))
         return existing["id"]
     cur = conn.execute(
         """INSERT INTO businesses (vertical, market, place_id, name, address, phone, website, rating,
@@ -109,6 +186,8 @@ def upsert_business(conn: sqlite3.Connection, b: Business, vertical: str, market
         (vertical, market, b.place_id, b.name, b.address, b.phone, b.website, b.rating, b.review_count,
          b.maps_url, b.status, reviews, now()),
     )
+    if data_id:
+        conn.execute("UPDATE businesses SET data_id = ? WHERE id = ?", (data_id, cur.lastrowid))
     return cur.lastrowid
 
 

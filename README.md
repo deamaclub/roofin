@@ -1,16 +1,17 @@
-# roofin — the $1 Roofing Opportunity Agent
+# roofin — the Roofing Opportunity Agent
 
 Not a SaaS. A machine with one job:
 
 **find a business losing money online → prove it → ask for a small payment.**
 
 ```
-Google Maps → roofers → website + reviews audit → specific evidenced problems
-           → one-page report with a ready-to-use fix → outreach draft → you approve & send
-           → "I'll fix one for $25. If you don't like it, don't pay." → roofin paid 7 25
+Google Maps (SerpApi free plan) → roofers → website + reviews audit → specific evidenced problems
+   → one-page report with a ready-to-use fix → email to every address they publish
+   → "I'll fix one for $6. If you don't like it, don't pay." → replies, opt-outs, one follow-up
+   → roofin paid 7 6 → repeat tomorrow
 ```
 
-The KPI is `roofin stats`. Until it says someone paid $1, nothing else matters.
+The KPI is `roofin stats`. Until it says someone paid, nothing else matters. Running it costs $0.
 
 ## What it checks
 
@@ -37,93 +38,111 @@ proof that gets the reply.
 Every business gets a **prospect score** (0–100): severity of the problems × whether it's a real, active,
 reachable business with customers. Closed businesses score 0. Clean sites score low and are never pitched.
 
+## The loop
+
+```
+roofin loop "Rochester NY" "Buffalo NY"
+```
+
+One pass, safe to run every day (Windows Task Scheduler / cron):
+
+1. **Find** roofers in each market (searched again every 30 days; repeats are merged).
+2. **Audit** every new business's website and listing.
+3. **Collect every email** on the site that belongs to the business (same domain as the site, or a Gmail-type
+   address). Web-designer and no-reply addresses are dropped.
+4. **Draft** a report + email for the top prospects, priced to keep $5 after payment fees.
+5. **Read your inbox**: replies are flagged for you; "stop / unsubscribe / not interested" suppresses that
+   whole company forever (every address, and the domain).
+6. **Send** new pitches (one email per business, to all of its addresses) and **one** follow-up after 4 days
+   of silence, in the same thread. Hard cap: 15 emails/day, spaced out.
+7. **Print your by-hand list**: businesses with only a phone number get a short script and a WhatsApp link
+   that opens with the message typed; you press send (or call them).
+8. **Stats**: funnel, revenue, profit, free-tier usage.
+
+Sites that looked *down* are never auto-pitched (it might have been your connection): check them and
+`roofin mark <id> approved`. Use `--dry-run` to see what would go out, or `--approved-only` to send only what
+you've approved.
+
+**When someone says yes:** you do the fix (the report has the copy), send your pay link, then
+`roofin paid <id> 6`.
+
 ## Setup ($0)
 
 ```bash
-pip install -e .            # add [dev] for tests
-export ROOFIN_SENDER_NAME="Your Name"
-export ROOFIN_SENDER_EMAIL="you@gmail.com"
-export ROOFIN_SENDER_ADDRESS="Your real postal address"   # legally required in US commercial email
+pip install -e .
 ```
 
-That's it. Everything below is free by default:
+Set these once (PowerShell: `$env:NAME = "value"`; macOS/Linux: `export NAME=value`):
 
-| Step | Free way (default) | Paid option (never needed) |
+| Variable | What | Cost |
 |---|---|---|
-| Find businesses | OpenStreetMap (`roofin discover`), plus `roofin add` / CSV for ones you see on Google Maps | Google Places API (`--source google`, needs a billing account) |
-| Audit websites | Your own computer visits the sites | — |
-| Report + email copy | Built-in templates | `--llm` uses the Claude API |
-| Sending | Your own Gmail/Outlook, by hand | — |
+| `ROOFIN_SENDER_NAME`, `ROOFIN_SENDER_EMAIL` | You | — |
+| `ROOFIN_SENDER_ADDRESS` | A real postal address (US law for commercial email; a PO box works) | — |
+| `SERPAPI_KEY` | Google Maps data incl. ratings & reviews. Free plan, 250 searches/month, no card | $0 |
+| `ROOFIN_SMTP_USER`, `ROOFIN_SMTP_PASSWORD` | Your Gmail + an [App Password](https://myaccount.google.com/apppasswords) (needs 2-step verification) | $0 |
+| `ROOFIN_PAY_LINK` | Your PayPal.me (or other) link, put in emails | $0 until paid |
+| `ROOFIN_PROCESSOR` | `paypal` (default), `stripe`, `venmo`, `cashapp`, `zelle`, which sets the fees | — |
 
-**OpenStreetMap is thinner than Google** and has no reviews. To fill the gaps for free, open Google Maps in your
-browser, search "roofers near Rochester NY", and add the ones you see:
+No `SERPAPI_KEY`? Discovery falls back to OpenStreetMap (free, no account, fewer businesses, no reviews).
+No mail settings? The loop still drafts everything; you send by hand.
 
-```bash
-roofin add "ABC Roofing" --market "Rochester NY" --website abcroofing.com --phone "585-555-0101" \
-    --rating 4.7 --reviews 12 --review "After the storm they tarped our roof same day"
-```
+**SerpApi budget:** a market search costs 3 calls (60 businesses), reviews cost 1 call each and are fetched
+only for the top 10 new prospects. Roughly 13 calls per new market, so about 15 markets/month on the free
+plan. roofin counts calls and stops at 250 (`ROOFIN_SERPAPI_MONTHLY` to change). At the limit, SerpApi
+refuses instead of billing, because the free plan has no card on file.
 
-Pasting 2–3 reviews lets roofin spot "your reviews mention storm damage but your site has no storm page".
-Or put many in a CSV (`name,website,phone,address,rating,review_count,reviews`, reviews separated by ` || `)
-and `roofin import leads.csv --market "Rochester NY"`.
-
-> Google Places (`--source google`) requires a Google Cloud billing account. A Maps "Demo Key" is free but is
-> not expected to work for the Places text search this uses; if you try one, it fails with an error rather
-> than charging you.
-
-## Use
+## Money: never spend a dime you didn't earn
 
 ```bash
-roofin run "Rochester NY"              # discover (free OpenStreetMap) + audit + draft top 10
-# or step by step:
-roofin discover "Rochester NY"
-roofin discover "Monroe County NY"     # a bigger area catches the suburbs
-roofin add "ABC Roofing" --market "Rochester NY" --website abcroofing.com
-roofin import leads.csv --market "Rochester NY"
-roofin audit
-roofin prospects                       # ranked, with each one's top 3 problems
-roofin draft --top 10 --offer 25       # writes out/NNNN-name.md (internal) + .html (client-facing)
-roofin draft --llm                     # optional, PAID: copy polished by the Claude API
-
-roofin outreach                        # list drafts
-roofin outreach --show 3               # read one
-roofin mark 3 approved                 # you read it and it's accurate
-roofin mark 3 sent                     # you sent it yourself
-roofin mark 3 replied
-roofin paid 3 1 --note "first dollar"
+roofin price                       # Charge $6 via paypal (3.49% + $0.49 fee = $0.70) → you keep $5.30
+roofin price --processor zelle     # Charge $5 → you keep $5.00
+roofin paid 3 6                    # records the payment and its fee
+roofin expense "SerpApi upgrade" 4 # allowed only if earnings cover it; otherwise refused
 roofin stats
 ```
 
-`--vertical hvac` swaps the industry pack. Everything else is the same engine.
+The price is the cheapest whole-dollar amount that keeps `--profit` (default $5) after fees. Every expense is
+checked against profit already received, so any bill is paid by a customer, not by you.
 
-### What V1 deliberately does not do
+## Other commands
 
-* **It never sends anything.** You read each draft and send it yourself (email, their contact form, or a
-  phone call using the report as your script). Every claim in a draft comes from something the detectors
-  actually saw; verify it before you send.
-* **It never touches Google listings.** Google is used read-only to research legitimate businesses. No fake
-  reviews, fake profiles, or listing manipulation — Google prohibits it, and lead-gen businesses aren't even
-  eligible for a Business Profile.
-* It respects `robots.txt`, visits at most 6 pages per site, and identifies itself in the User-Agent.
+```bash
+roofin discover "Rochester NY"     # just find (serpapi if key, else osm; --source to force)
+roofin add "ABC Roofing" --market "Rochester NY" --website abcroofing.com --rating 4.7 --reviews 12 \
+    --review "They tarped our roof the same day after the storm"
+roofin import leads.csv --market "Rochester NY"   # name,website,phone,address,rating,review_count,reviews
+roofin audit [--new-only]
+roofin prospects                   # ranked, with each one's top 3 problems
+roofin draft                       # reports in out/: .md (internal) and .html (client-facing)
+roofin outreach / --show 3         # list / read one (and their reply)
+roofin send [--dry-run]            # just the sending step
+roofin inbox                       # just the reply-reading step
+roofin calls                       # phone-only prospects, script + WhatsApp link
+roofin mark 3 approved|sent|replied|won|lost|opted_out
+```
 
-### Sending responsibly
+## What it won't do, and why
 
-Drafts include your name, a real postal address, and a "reply stop" line (CAN-SPAM). One personal email per
-business; if they say stop, `roofin mark <id> opted_out` and never contact them again. Send from your own
-mailbox, a few a day, not a bulk tool.
+* **Auto-message WhatsApp or Telegram.** WhatsApp bans numbers that send unsolicited messages or use
+  unofficial automation, and its official API needs recipient opt-in and charges per conversation. Telegram
+  bans accounts for unsolicited bulk messages. Automated texts to cell phones also fall under the TCPA in the US
+  ($500–$1,500 per message). So phone-only leads get a script and a click-to-chat link, and you send each one
+  yourself.
+* **Touch Google listings.** Google is only read. No fake reviews or profiles.
+* **Email anyone twice** beyond one follow-up, or ever again after "stop".
+* **Spend money you haven't earned.** `--llm` (Claude copy polish) is the only paid feature, off by default.
 
-## The ladder
+## Sending responsibly
 
-1. Get one stranger to pay **$1** (`--offer 1`, or "free sample, $25 for the full fix").
-2. $5 → $25 → $100 per fix.
-3. Recurring: monthly re-audit + fixes for $49–$199/month.
+Every email has your name, real postal address, an honest subject, a "reply stop" line and a
+List-Unsubscribe header (CAN-SPAM). Keep the daily cap low: a personal Gmail that blasts strangers gets
+flagged, and then nothing you send lands. 10–15 a day of specific, personal emails beats 200 generic ones.
 
 ## Roadmap
 
-* **V1 (this)** — find, audit, report, draft; you approve and send.
-* **V2** — automated sending with throttling, reply detection, follow-ups, opt-out handling.
-* **V3** — after written authorization, the agent applies fixes to the client's site.
-* **V4** — monthly monitoring + re-audit report, billed as a subscription.
+* **Done:** find → audit → report → send → replies/opt-outs → follow-up → payments & expense guard.
+* **Next:** after written authorization, apply fixes to the client's site; monthly re-audit billed as a
+  subscription ($49–$199/month).
 
 ## Adding a vertical
 
@@ -136,14 +155,18 @@ removal, concrete, pressure washing, auto detailing — same engine, new word li
 ```
 roofin/
   discovery.py   OpenStreetMap (free) / Google Places (paid) / CSV import
+  serp.py        SerpApi Google Maps + reviews (free plan), with a monthly call budget
   crawl.py       polite shallow crawl (robots.txt, priority links)
   facts.py       HTML → facts (forms, tel links, CTAs, emails, viewport, nav…)
   detect.py      findings, competitor leaders, prospect score
   verticals/     industry packs (roofing, hvac)
-  outreach.py    email draft + offer
+  contacts.py    which emails belong to the business; WhatsApp click-to-chat links
+  outreach.py    email draft, follow-up, offer
+  pricing.py     price that nets your target profit after payment fees
+  mailer.py      send via your mailbox (SMTP), read replies (IMAP), opt-out detection
   report.py      Markdown (internal) and HTML (client-facing) one-pagers
   llm.py         optional Claude rewrite of copy (structured output, no new claims)
-  db.py          SQLite: businesses, audits, findings, outreach, payments
+  db.py          SQLite: businesses, audits, findings, outreach, payments, expenses, suppressions
   cli.py         the commands above
 tests/           offline tests with fixture websites (pytest)
 ```
