@@ -945,7 +945,32 @@ def cmd_outreach(args, conn) -> None:
         print("No outreach yet. Run `roofin draft`.")
 
 
+def load_env_files(paths: list[Path] | None = None) -> list[Path]:
+    """Read KEY=value lines from ./.env and ~/.roofin.env. Real environment variables win."""
+    if paths is None:
+        if os.environ.get("ROOFIN_NO_ENV_FILE"):
+            return []
+        paths = [Path.cwd() / ".env", Path.home() / ".roofin.env"]
+    loaded = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.removeprefix("export ").partition("=")
+            key, value = key.strip(), value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            if key and value:  # blank placeholders in the template mean "not set"
+                os.environ.setdefault(key, value)
+        loaded.append(path)
+    return loaded
+
+
 def main(argv: list[str] | None = None) -> None:
+    load_env_files()
     args = build_parser().parse_args(argv)
     conn = db.connect(args.db)
     try:

@@ -78,7 +78,8 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 sudo apt install -y nodejs npm        # only for Cloudflare Pages demos
 ```
 
-Put these in a private env file (`chmod 600`) and load it with `set -a; source ~/.roofin.env; set +a`:
+Copy `.env.example` to `.env` in the folder you run roofin from (or to `~/.roofin.env`) and fill it in.
+roofin reads it automatically. Never commit it (`.env` is git-ignored).
 
 | Variable | What | Cost |
 |---|---|---|

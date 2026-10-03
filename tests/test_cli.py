@@ -68,3 +68,16 @@ def test_city_of():
     assert cli.city_of("Rochester NY") == "Rochester"
     assert cli.city_of("Grand Rapids, MI") == "Grand Rapids"
     assert cli.city_of("Buffalo") == "Buffalo"
+
+
+def test_env_file_loading(tmp_path, monkeypatch):
+    f = tmp_path / ".env"
+    f.write_text("# comment\nROOFIN_T1='a b'\nexport ROOFIN_T2=\"x=y\"\nROOFIN_T3=keep\nEMPTY_ONE=\n")
+    monkeypatch.setenv("ROOFIN_T3", "from-shell")
+    monkeypatch.delenv("ROOFIN_T1", raising=False)
+    monkeypatch.delenv("ROOFIN_T2", raising=False)
+    assert cli.load_env_files([f, tmp_path / "missing"]) == [f]
+    import os
+    assert os.environ["ROOFIN_T1"] == "a b" and os.environ["ROOFIN_T2"] == "x=y"
+    assert os.environ["ROOFIN_T3"] == "from-shell"
+    assert "EMPTY_ONE" not in os.environ

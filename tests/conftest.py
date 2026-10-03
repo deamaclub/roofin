@@ -42,6 +42,12 @@ STRONG_ROUTES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def no_env_file(monkeypatch):
+    """Never let a developer's real .env leak into tests."""
+    monkeypatch.setenv("ROOFIN_NO_ENV_FILE", "1")
+
+
 @pytest.fixture
 def weak_session():
     return FakeSession(WEAK_ROUTES)
