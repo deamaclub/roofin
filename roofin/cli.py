@@ -1,8 +1,9 @@
 """roofin: find money -> create proof -> ask for money. Free by default.
 
     roofin loop "Rochester NY" "Buffalo NY"   # the whole loop; schedule it daily
-        find businesses -> audit sites -> collect every email -> draft -> send (capped)
-        -> read replies / opt-outs -> one follow-up -> print who to call or WhatsApp yourself
+        Stripe payments -> find businesses -> audit sites -> collect all contact info -> draft + demo
+        + pay link -> publish demos (Cloudflare Pages / Netlify) -> replies / opt-outs -> send email (capped) + one follow-up
+        -> Telegram you a copy-paste card per prospect
 
     roofin price                         # what to charge to net $5 after payment fees
     roofin inbox                         # who replied
@@ -21,7 +22,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import json
+import secrets
+import shutil
+
 from . import db, pricing, serp, verticals
+from .cards import prospect_card, reply_card
+from .cloudflare import CloudflarePages
+from .netlify import DemoHostError, Netlify
+from .stripe_pay import Stripe, StripeError
+from .telegram import Telegram, TelegramError, find_chat_id
 from .contacts import FREE_MAIL, split_emails, short_pitch, usable_emails, whatsapp_link
 from .crawl import fetch_site
 from .detect import build_market, detect, score
@@ -79,8 +89,38 @@ def suppress_all(conn, emails: list[str], reason: str) -> None:
             db.suppress(conn, domain, reason)
 
 
-def make_mailer(cfg: MailConfig):  # replaced in tests
+def make_mailer(cfg: MailConfig):  # these factories are replaced in tests
     return Mailer(cfg)
+
+
+def make_telegram():
+    return Telegram.from_env()
+
+
+def make_host():
+    """Where demo pages are published. Cloudflare Pages if configured (unlimited bandwidth), else Netlify."""
+    choice = os.environ.get("ROOFIN_DEMO_HOST", "auto")
+    if choice in ("auto", "cloudflare"):
+        cf = CloudflarePages.from_env()
+        if cf or choice == "cloudflare":
+            return cf
+    return Netlify.from_env()
+
+
+def make_stripe():
+    return Stripe.from_env()
+
+
+def demo_ready(conn, row) -> bool:
+    """A message that links to a demo may only go out once that demo is actually live."""
+    if not row["demo_url"]:
+        return True
+    live_until = int(db.get_setting(conn, "demos_live_until") or 0)
+    return row["id"] <= live_until
+
+
+def site_dir() -> Path:
+    return Path(os.environ.get("ROOFIN_SITE_DIR", "site"))
 
 
 # ---------------------------------------------------------------- find
@@ -208,6 +248,10 @@ def cmd_audit(args, conn) -> None:
             emails = usable_emails(facts.emails, b.website) if facts else []
             if emails:
                 conn.execute("UPDATE businesses SET email = ? WHERE id = ?", (", ".join(emails), b.id))
+            if facts:
+                contacts = {"emails": emails, "phones": facts.phones, "socials": facts.socials,
+                            "whatsapp": facts.whatsapp, "contact_form": facts.contact_form_url}
+                conn.execute("UPDATE businesses SET contacts_json = ? WHERE id = ?", (json.dumps(contacts), b.id))
             print(f"  {s:5.1f}  {b.name[:40]:40}  {len(findings)} finding(s)  {len(emails)} email(s)")
         conn.commit()
 
@@ -258,6 +302,14 @@ def cmd_draft(args, conn) -> None:
     if not rows:
         print("Nothing new to draft (all top prospects already have outreach, or nothing is audited).")
         return
+    # Live demo links only if this run can actually publish them; otherwise the demo is sent as a file.
+    host, base = make_host(), None
+    if host and host.remaining(conn) > 0:
+        try:
+            base = host.base_url(conn)
+        except DemoHostError as exc:
+            print(f"  Demo host: {exc}; demos will be attached as files instead")
+    stripe = make_stripe()
     for r in rows:
         b = db.row_to_business(r)
         findings = db.audit_findings(conn, r["audit_id"])
@@ -266,32 +318,171 @@ def cmd_draft(args, conn) -> None:
         emails = split_emails(r["email"])
         if any(db.suppressed(conn, e) for e in emails):
             continue  # they asked not to be contacted; not by email, not by phone
-        draft = draft_email(b, findings, v, offer, sender, pay_link=args.pay_link)
+        now = db.now()
+        oid = conn.execute(
+            """INSERT INTO outreach (business_id, audit_id, channel, recipient, subject, body, offer_cents,
+               status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,'draft',?,?)""",
+            (r["id"], r["audit_id"], "pending", "", "", "", offer, now, now),
+        ).lastrowid
+
+        pay_url, link_id = args.pay_link, None
+        if stripe:
+            try:
+                link_id, pay_url = stripe.payment_link(conn, offer, oid, b.name)
+            except StripeError as exc:
+                print(f"  Stripe: {exc}; using ROOFIN_PAY_LINK instead")
+
+        token = f"{slug(b.name)[:40]}-{secrets.token_hex(4)}"  # unguessable, so demos can't be browsed
+        demo_url = f"{base}/{token}/" if base else None
+        draft = draft_email(b, findings, v, offer, sender, report_url=demo_url, pay_link=pay_url)
         if args.llm:
             from .llm import polish
             draft, findings = polish(b, findings, v, city_of(r["market"]), offer, sender, draft)
-        base = out_dir / f"{r['id']:04d}-{slug(b.name)}"
-        base.with_suffix(".md").write_text(markdown(b, findings, r["score"], offer, draft), encoding="utf-8")
-        base.with_suffix(".html").write_text(html_page(b, findings, offer), encoding="utf-8")
+        page = html_page(b, findings, offer, pay_url=pay_url)
+        demo_file = site_dir() / token / "index.html"
+        demo_file.parent.mkdir(parents=True, exist_ok=True)
+        demo_file.write_text(page, encoding="utf-8")
+        base_out = out_dir / f"{oid:04d}-{slug(b.name)}"
+        base_out.with_suffix(".md").write_text(markdown(b, findings, r["score"], offer, draft), encoding="utf-8")
+        shutil.copyfile(demo_file, base_out.with_suffix(".html"))
+
         if emails:
             channel, recipient, body = "email", ", ".join(emails), draft.body
         elif r["phone"]:
-            # No email: a short message you send yourself (call, text, or WhatsApp link).
             pitch = short_pitch(b.name, pick_top(findings)[0].title, money(offer))
             link = whatsapp_link(r["phone"], pitch)
             channel, recipient = "phone", r["phone"]
             body = pitch + (f"\n\nWhatsApp (opens with this message, you press send): {link}" if link else "")
         else:
             channel, recipient, body = "web_form", r["website"], draft.body
-        now = db.now()
         conn.execute(
-            """INSERT INTO outreach (business_id, audit_id, channel, recipient, subject, body, offer_cents,
-               status, report_path, created_at, updated_at) VALUES (?,?,?,?,?,?,?,'draft',?,?,?)""",
-            (r["id"], r["audit_id"], channel, recipient, draft.subject, body, offer,
-             str(base.with_suffix(".html")), now, now),
+            """UPDATE outreach SET channel=?, recipient=?, subject=?, body=?, report_path=?, demo_path=?,
+               demo_url=?, pay_url=?, stripe_link_id=? WHERE id=?""",
+            (channel, recipient, draft.subject, body, str(base_out.with_suffix(".html")), str(demo_file),
+             demo_url, pay_url, link_id, oid),
         )
-        print(f"  drafted  {b.name[:40]:40} {channel:8} {recipient}")
-    conn.commit()
+        conn.commit()
+        print(f"  drafted  #{oid} {b.name[:40]:40} {channel:8} {recipient}")
+
+
+def cmd_publish(args, conn) -> bool:
+    """Push new demo pages live. Returns False if demos that emails link to are not live."""
+    host = make_host()
+    if not host:
+        return True
+    pending = conn.execute("SELECT COUNT(*) FROM outreach WHERE demo_url IS NOT NULL").fetchone()[0]
+    if not pending:
+        return True
+    try:
+        dep = host.deploy(conn, site_dir())
+    except DemoHostError as exc:
+        print(f"Demo host: {exc}. Holding messages that link to new demos until they're live.")
+        return False
+    newest = conn.execute("SELECT MAX(id) FROM outreach WHERE demo_url IS NOT NULL").fetchone()[0]
+    db.set_setting(conn, "demos_live_until", str(newest))
+    print("Demos published." if dep else "Demos already live; nothing to publish.")
+    return True
+
+
+def cmd_payments(args, conn) -> None:
+    """Ask Stripe which payment links were paid; record them and turn those links off."""
+    stripe = make_stripe()
+    if not stripe:
+        return
+    rows = conn.execute(
+        """SELECT o.*, b.name FROM outreach o JOIN businesses b ON b.id = o.business_id
+           WHERE o.stripe_link_id IS NOT NULL AND o.status NOT IN ('paid','opted_out')"""
+    ).fetchall()
+    tg = make_telegram()
+    for r in rows:
+        try:
+            paid = stripe.completed(r["stripe_link_id"])
+        except StripeError as exc:
+            print(f"  Stripe: {exc}")
+            return
+        if not paid:
+            continue
+        pct, fixed = pricing.PROCESSORS["stripe"]
+        for p in paid:
+            fee = p.fee_cents if p.fee_cents is not None else pricing.fee_cents(p.amount_cents, pct, fixed)
+            conn.execute("INSERT INTO payments (outreach_id, amount_cents, fee_cents, note, received_at) "
+                         "VALUES (?,?,?,?,?)", (r["id"], p.amount_cents, fee, f"stripe {p.session_id}", db.now()))
+        db.set_outreach_status(conn, r["id"], "paid")
+        conn.commit()
+        try:
+            stripe.deactivate(r["stripe_link_id"])
+        except StripeError:
+            pass
+        total = sum(p.amount_cents for p in paid)
+        print(f"  PAID     #{r['id']} {r['name']} {money(total)}")
+        if tg:
+            m = db.money_summary(conn)
+            tg.send(f"💰 <b>{r['name']} paid {money(total)}</b> (#{r['id']})\n"
+                    f"Profit so far: {money(m['net'])}")
+
+
+def _contacts(row) -> dict:
+    try:
+        return json.loads(row["contacts_json"] or "{}")
+    except ValueError:
+        return {}
+
+
+def cmd_notify(args, conn) -> None:
+    """Send each new prospect to your Telegram as a ready-to-paste card."""
+    tg = make_telegram()
+    if not tg:
+        print("Telegram not set up (ROOFIN_TELEGRAM_TOKEN / ROOFIN_TELEGRAM_CHAT_ID); see `roofin telegram-setup`.")
+        return
+    rows = conn.execute(
+        """SELECT o.*, b.name, b.market, b.rating, b.review_count, b.website, b.phone AS listing_phone,
+                  b.contacts_json, a.score
+           FROM outreach o JOIN businesses b ON b.id = o.business_id JOIN audits a ON a.id = o.audit_id
+           WHERE o.notified_at IS NULL AND o.status IN ('draft','approved','sent') ORDER BY a.score DESC"""
+    ).fetchall()
+    for r in rows:
+        if not demo_ready(conn, r):
+            continue
+        findings = db.audit_findings(conn, r["audit_id"])
+        contacts = _contacts(r)
+        if r["channel"] == "email" and not contacts.get("emails"):
+            contacts["emails"] = split_emails(r["recipient"])
+        emailed = split_emails(r["recipient"]) if r["status"] == "sent" and r["channel"] == "email" else None
+        msgs = prospect_card(
+            outreach_id=r["id"], name=r["name"], market=r["market"], score=r["score"], rating=r["rating"],
+            review_count=r["review_count"], website=r["website"], contacts=contacts,
+            listing_phone=r["listing_phone"], findings=findings, offer_cents=r["offer_cents"],
+            subject=r["subject"], email_body=r["body"] if r["channel"] == "email" else "",
+            demo_url=r["demo_url"], pay_url=r["pay_url"], emailed_to=emailed,
+        )
+        try:
+            for m in msgs:
+                tg.send(m)
+            if not r["demo_url"] and r["demo_path"] and Path(r["demo_path"]).exists():
+                tg.send_file(r["demo_path"], "Demo page: send this file to them (or open it to copy the fix).")
+        except TelegramError as exc:
+            print(f"  Telegram: {exc}")
+            return
+        conn.execute("UPDATE outreach SET notified_at = ? WHERE id = ?", (db.now(), r["id"]))
+        conn.commit()
+        print(f"  telegram #{r['id']} {r['name']}")
+
+
+def cmd_telegram_setup(args, conn) -> None:
+    token = os.environ.get("ROOFIN_TELEGRAM_TOKEN")
+    if not token:
+        sys.exit("Set ROOFIN_TELEGRAM_TOKEN first (Telegram → @BotFather → /newbot).")
+    try:
+        chats = find_chat_id(token)
+    except TelegramError as exc:
+        sys.exit(f"error: {exc}")
+    if not chats:
+        sys.exit("No messages yet. Open your bot in Telegram, press Start / send it 'hi', then run this again.")
+    for cid, who in chats:
+        print(f"ROOFIN_TELEGRAM_CHAT_ID={cid}   ({who})")
+    if len(chats) == 1:
+        Telegram(token, chats[0][0]).send("✅ roofin is connected. Prospects will arrive here.")
+        print("Sent a test message to your Telegram.")
 
 
 # ---------------------------------------------------------------- send / inbox
@@ -324,6 +515,8 @@ def cmd_send(args, conn) -> None:
     for r in rows:
         if sent >= budget:
             break
+        if not demo_ready(conn, r):
+            continue
         codes = {f.code for f in db.audit_findings(conn, r["audit_id"])}
         if codes & NEEDS_HUMAN_CHECK and r["status"] != "approved":
             print(f"  hold     #{r['id']} {r['name']}: check the site yourself, then `roofin mark {r['id']} approved`")
@@ -387,7 +580,13 @@ def cmd_inbox(args, conn) -> None:
     by_addr = {e: r for r in pending for e in split_emails(r["recipient"])}
     by_domain = {e.rsplit("@", 1)[1]: r for e, r in by_addr.items() if e.rsplit("@", 1)[1] not in FREE_MAIL}
     found = 0
+    tg = make_telegram()
+    seen = set(filter(None, (db.get_setting(conn, "seen_replies") or "").split("\n")))
     for msg in make_mailer(cfg).fetch_recent(days=args.days):
+        mid = msg.get("Message-ID") or f"{msg.get('From')}|{msg.get('Date')}|{msg.get('Subject')}"
+        if mid in seen:
+            continue
+        seen.add(mid)
         rep = parse_reply(msg)
         if rep.sender == cfg.user.lower():
             continue
@@ -400,12 +599,19 @@ def cmd_inbox(args, conn) -> None:
             suppress_all(conn, split_emails(r["recipient"]) + [rep.sender], f"replied: {rep.text[:80]}")
             db.set_outreach_status(conn, r["id"], "opted_out")
             print(f"  OPT-OUT  #{r['id']} {r['name']} — suppressed forever")
+            if tg:
+                tg.send(f"🚫 {r['name']} (#{r['id']}) asked not to be contacted. Done, they won't hear from you again.")
         else:
             if r["status"] == "sent":
                 db.set_outreach_status(conn, r["id"], "replied")
             conn.execute("UPDATE outreach SET reply_snippet = ? WHERE id = ?", (rep.text[:500], r["id"]))
             print(f"  REPLY    #{r['id']} {r['name']} <{rep.sender}>:\n           {rep.text[:300]!r}")
+            if tg:
+                for m in reply_card(r["id"], r["name"], rep.sender, rep.text, db.audit_findings(conn, r["audit_id"]),
+                                    r["offer_cents"], r["pay_url"], r["demo_url"]):
+                    tg.send(m)
         conn.commit()
+    db.set_setting(conn, "seen_replies", "\n".join(sorted(seen)[-2000:]))
     if not found:
         print("No new replies.")
     else:
@@ -512,6 +718,8 @@ def cmd_loop(args, conn) -> None:
     """One pass of the whole machine. Safe to run every day: it never contacts anyone twice
     (except one follow-up), never contacts anyone who opted out, and stops at the daily cap."""
     v = verticals.get(args.vertical)
+    print("=== payments ===")
+    cmd_payments(args, conn)
     for market in args.markets:
         print(f"\n=== {market} ===")
         last = conn.execute("SELECT MAX(created_at) FROM businesses WHERE vertical = ? AND market = ?",
@@ -527,15 +735,19 @@ def cmd_loop(args, conn) -> None:
         args.market, args.limit, args.new_only = market, None, True
         cmd_audit(args, conn)
         cmd_draft(args, conn)
-    print("\n=== replies ===")
+    print("\n=== demos ===")
+    cmd_publish(args, conn)
     if MailConfig.from_env():
+        print("\n=== replies ===")
         cmd_inbox(args, conn)
         print("\n=== sending ===")
         cmd_send(args, conn)
+    if make_telegram():
+        print("\n=== telegram ===")
+        cmd_notify(args, conn)
     else:
-        print("Email not configured (ROOFIN_SMTP_USER / ROOFIN_SMTP_PASSWORD); drafts are waiting in `roofin outreach`.")
-    print("\n=== yours to do by hand ===")
-    cmd_calls(args, conn)
+        print("\n=== yours to do by hand (set up Telegram to get these as copy-paste cards) ===")
+        cmd_calls(args, conn)
     print()
     cmd_stats(args, conn)
 
@@ -550,7 +762,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     def money_opts(sp):
         sp.add_argument("--processor", choices=sorted(pricing.PROCESSORS),
-                        default=os.environ.get("ROOFIN_PROCESSOR", "paypal"), help="how you get paid (sets fees)")
+                        default=os.environ.get("ROOFIN_PROCESSOR") or ("stripe" if os.environ.get("STRIPE_SECRET_KEY") else "paypal"),
+                        help="how you get paid (sets fees); stripe when STRIPE_SECRET_KEY is set")
         sp.add_argument("--fee-pct", type=float, help="override the processor's percentage fee")
         sp.add_argument("--fee-fixed", help="override the processor's fixed fee in dollars")
         sp.add_argument("--profit", default=os.environ.get("ROOFIN_PROFIT", "5"),
@@ -652,6 +865,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("inbox", help="read replies; opt-outs are suppressed forever")
     sp.add_argument("--days", type=int, default=21)
     sp.set_defaults(fn=cmd_inbox)
+
+    sp = sub.add_parser("publish", help="push new demo pages live (Cloudflare Pages or Netlify)")
+    sp.set_defaults(fn=cmd_publish)
+
+    sp = sub.add_parser("payments", help="check Stripe for payments and record them")
+    sp.set_defaults(fn=cmd_payments)
+
+    sp = sub.add_parser("notify", help="send new prospects to your Telegram as copy-paste cards")
+    sp.set_defaults(fn=cmd_notify)
+
+    sp = sub.add_parser("telegram-setup", help="find your Telegram chat id and send a test message")
+    sp.set_defaults(fn=cmd_telegram_setup)
 
     sp = sub.add_parser("calls", help="phone-only prospects: script + WhatsApp link to send yourself")
     sp.set_defaults(fn=cmd_calls)

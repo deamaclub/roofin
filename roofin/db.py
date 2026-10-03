@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS expenses (
     spent_at TEXT NOT NULL
 );
 
+-- Small key/value store (Stripe product/price ids, etc.)
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Calls to metered free tiers (SerpApi), so we stop before the monthly allowance runs out.
 CREATE TABLE IF NOT EXISTS api_usage (
     id INTEGER PRIMARY KEY,
@@ -98,8 +104,10 @@ CREATE TABLE IF NOT EXISTS api_usage (
 
 # Columns added after the first release; applied to existing databases on connect.
 MIGRATIONS = {
-    "businesses": {"data_id": "TEXT"},
-    "outreach": {"message_id": "TEXT", "sent_at": "TEXT", "followup_at": "TEXT", "reply_snippet": "TEXT"},
+    "businesses": {"data_id": "TEXT", "contacts_json": "TEXT"},
+    "outreach": {"message_id": "TEXT", "sent_at": "TEXT", "followup_at": "TEXT", "reply_snippet": "TEXT",
+                 "demo_path": "TEXT", "demo_url": "TEXT", "pay_url": "TEXT", "stripe_link_id": "TEXT",
+                 "notified_at": "TEXT"},
     "payments": {"fee_cents": "INTEGER NOT NULL DEFAULT 0"},
 }
 
@@ -122,6 +130,17 @@ def connect(path: str) -> sqlite3.Connection:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     conn.commit()
     return conn
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                 (key, value))
+    conn.commit()
 
 
 def suppressed(conn: sqlite3.Connection, email: str) -> bool:

@@ -51,8 +51,8 @@ def markdown(b: Business, findings: list[Finding], score: float, offer_cents: in
     return "\n".join(lines)
 
 
-def html_page(b: Business, findings: list[Finding], offer_cents: int) -> str:
-    """Client-facing page: no score, no internal notes."""
+def html_page(b: Business, findings: list[Finding], offer_cents: int, pay_url: str | None = None) -> str:
+    """Client-facing page (the demo): no score, no internal notes, kept out of search engines."""
     e = html.escape
     top = pick_top(findings)
     cards = []
@@ -65,9 +65,12 @@ def html_page(b: Business, findings: list[Finding], offer_cents: int) -> str:
         )
     rest = "".join(f"<li>{e(f.title)}</li>" for f in findings if f not in top)
     rest_html = f"<h2>Also noticed</h2><ul>{rest}</ul>" if rest else ""
+    pay_html = (f'<p><a class="pay" href="{e(pay_url)}">Pay {money(offer_cents)} after you approve the fix</a></p>'
+                if pay_url else "")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
 <title>{e(b.name)} — Opportunity Report</title>
 <style>
 :root {{ --bg:#f7f7f5; --fg:#1d1d1b; --muted:#666; --card:#fff; --line:#e3e3df; --hot:#c2410c; --warm:#b45309; --mild:#4b5563; }}
@@ -79,6 +82,7 @@ h1 {{ font-size:1.6rem; margin:0 0 4px; }} .sub {{ color:var(--muted); margin:0 
 .sev3 {{ border-left-color:var(--hot); }} .sev2 {{ border-left-color:var(--warm); }}
 .card h3 {{ margin:0 0 4px; font-size:1.1rem; }} .tag {{ margin:0 0 8px; color:var(--muted); font-size:.85rem; }}
 pre {{ white-space:pre-wrap; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:12px; font-size:.9rem; }}
+.pay {{ display:inline-block; margin-top:8px; padding:10px 16px; border-radius:6px; background:var(--fg); color:var(--bg); text-decoration:none; font-weight:600; }}
 .offer {{ background:var(--card); border:2px solid var(--fg); border-radius:8px; padding:16px 18px; }}
 </style></head>
 <body><main>
@@ -86,6 +90,6 @@ pre {{ white-space:pre-wrap; background:var(--bg); border:1px solid var(--line);
 <p class="sub">I found {len(top)} thing{'s' if len(top) != 1 else ''} potentially costing you leads.</p>
 {''.join(cards)}
 {rest_html}
-<div class="offer"><b>I'll fix one of these for {money(offer_cents)}.</b> If you don't like it, don't pay. Just reply to my email.</div>
+<div class="offer"><b>I'll fix one of these for {money(offer_cents)}.</b> If you don't like it, don't pay. Just reply to my message.{pay_html}</div>
 </main></body></html>
 """

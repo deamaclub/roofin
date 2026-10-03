@@ -13,6 +13,12 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_RE = re.compile(r"\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b")
 COPYRIGHT_RE = re.compile(r"(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-–]\s*)?(\d{4})", re.I)
 IGNORED_EMAIL_DOMAINS = ("example.com", "sentry.io", "wixpress.com", "domain.com", "email.com")
+SOCIAL_HOSTS = {
+    "facebook": ("facebook.com", "fb.com"), "instagram": ("instagram.com",), "linkedin": ("linkedin.com",),
+    "x": ("twitter.com", "x.com"), "youtube": ("youtube.com",), "tiktok": ("tiktok.com",),
+    "nextdoor": ("nextdoor.com",), "yelp": ("yelp.com",), "google": ("g.page", "maps.app.goo.gl", "goo.gl/maps"),
+}
+SOCIAL_SKIP = ("sharer", "share?", "/share", "intent/tweet", "plugins", "/tr?", "dialog/")
 TESTIMONIAL_WORDS = ("testimonial", "what our customers say", "reviews", "5 stars", "five star", "★★★★★")
 
 
@@ -41,6 +47,10 @@ class SiteFacts:
     pages: list[PageFacts] = field(default_factory=list)
     emails: list[str] = field(default_factory=list)
     phones_on_home: list[str] = field(default_factory=list)
+    phones: list[str] = field(default_factory=list)  # every number on every page, normalized (585) 555-0101
+    socials: dict[str, str] = field(default_factory=dict)  # network -> profile URL
+    whatsapp: list[str] = field(default_factory=list)  # wa.me / api.whatsapp.com links the business published
+    contact_form_url: str | None = None  # first page with a usable lead form
 
     @property
     def any_form(self) -> bool:
@@ -105,9 +115,32 @@ def extract(snap: SiteSnapshot) -> SiteFacts:
     ).lower()
 
     emails: set[str] = set()
+    phones: dict[str, None] = {}
     for i, page in enumerate(snap.pages):
         pf, soup = page_facts(page.url, page.html)
         facts.pages.append(pf)
+        if pf.has_form and not facts.contact_form_url:
+            facts.contact_form_url = pf.url
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            low = href.lower()
+            if low.startswith("tel:"):
+                n = format_phone(href[4:])
+                if n:
+                    phones.setdefault(n)
+            elif "wa.me/" in low or "api.whatsapp.com" in low:
+                if href not in facts.whatsapp:
+                    facts.whatsapp.append(href)
+            elif low.startswith("http") and not any(x in low for x in SOCIAL_SKIP):
+                host = urlparse(low).netloc.removeprefix("www.").removeprefix("m.")
+                for net, hosts in SOCIAL_HOSTS.items():
+                    if net not in facts.socials and any(host == h or (h + "/") in low for h in hosts) \
+                            and urlparse(low).path.strip("/"):
+                        facts.socials[net] = href
+        for m in PHONE_RE.findall(soup.get_text(" ")):
+            n = format_phone(m)
+            if n:
+                phones.setdefault(n)
         for a in soup.find_all("a", href=re.compile(r"^\s*mailto:", re.I)):
             emails.add(a["href"].split(":", 1)[1].split("?")[0].strip().lower())
         emails.update(e.lower() for e in EMAIL_RE.findall(soup.get_text(" ")))
@@ -116,8 +149,18 @@ def extract(snap: SiteSnapshot) -> SiteFacts:
             facts.phones_on_home = PHONE_RE.findall(soup.get_text(" "))
             years = [int(y) for y in COPYRIGHT_RE.findall(str(raw_home))]
             facts.copyright_year = max(years) if years else None
+    facts.phones = list(phones)
     facts.emails = sorted(
         e for e in emails
         if not e.endswith(IGNORED_EMAIL_DOMAINS) and not e.endswith((".png", ".jpg", ".webp", ".gif"))
     )
     return facts
+
+
+def format_phone(raw: str) -> str | None:
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10 or digits[0] in "01":
+        return None
+    return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"

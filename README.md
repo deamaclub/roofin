@@ -46,57 +46,66 @@ roofin loop "Rochester NY" "Buffalo NY"
 
 One pass, safe to run every day (Windows Task Scheduler / cron):
 
-1. **Find** roofers in each market (searched again every 30 days; repeats are merged).
-2. **Audit** every new business's website and listing.
-3. **Collect every email** on the site that belongs to the business (same domain as the site, or a Gmail-type
-   address). Web-designer and no-reply addresses are dropped.
-4. **Draft** a report + email for the top prospects, priced to keep $5 after payment fees.
-5. **Read your inbox**: replies are flagged for you; "stop / unsubscribe / not interested" suppresses that
-   whole company forever (every address, and the domain).
-6. **Send** new pitches (one email per business, to all of its addresses) and **one** follow-up after 4 days
-   of silence, in the same thread. Hard cap: 15 emails/day, spaced out.
-7. **Print your by-hand list**: businesses with only a phone number get a short script and a WhatsApp link
-   that opens with the message typed; you press send (or call them).
-8. **Stats**: funnel, revenue, profit, free-tier usage.
+1. **Payments**: asks Stripe which payment links were paid, records them with Stripe's real fee, turns those
+   links off, and pings your Telegram.
+2. **Find** roofers in each market (searched again every 30 days; repeats are merged).
+3. **Audit** every new business's website and listing and collect **all contact info** it publishes: emails
+   (the business's own, not the web designer's), every phone number, contact-form page, Facebook/Instagram/
+   LinkedIn/Yelp/etc., WhatsApp links.
+4. **Draft**, per prospect: the email, a short message for forms/DMs/texts, a **demo page** (the report with
+   ready-to-use fix copy, at an unguessable URL, hidden from search engines) and a **Stripe payment link**,
+   priced to keep $5 after fees.
+5. **Publish** new demos (Cloudflare Pages or Netlify). Anything that links to a demo waits until it's live.
+6. **Inbox** (if Gmail is set up): replies go to your Telegram with a ready answer; "stop / unsubscribe /
+   not interested" suppresses that whole company forever.
+7. **Send** (if Gmail is set up): one email per business to all its addresses, max 15/day, plus **one**
+   follow-up after 4 days of silence, in the same thread.
+8. **Telegram you a card per prospect**: what's wrong, every contact method, the demo and pay links, numbered
+   steps ("1. open the contact form → paste SHORT MESSAGE"), and each message in its own block, so one tap
+   copies it. WhatsApp links open with the message already typed; you press send.
 
-Sites that looked *down* are never auto-pitched (it might have been your connection): check them and
-`roofin mark <id> approved`. Use `--dry-run` to see what would go out, or `--approved-only` to send only what
-you've approved.
+No Telegram? The loop prints the by-hand list instead. Sites that looked *down* are never auto-pitched (it
+might have been your connection): check them and `roofin mark <id> approved`. `--dry-run` shows what would
+go out; `--approved-only` sends only what you approved.
 
-**When someone says yes:** you do the fix (the report has the copy), send your pay link, then
-`roofin paid <id> 6`.
+**When someone says yes:** paste the "IF THEY SAY YES" block, do the fix (the copy is on the demo page), and
+they pay through the Stripe link. The next loop records it.
 
 ## Setup ($0)
 
 ```bash
-pip install -e .
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+sudo apt install -y nodejs npm        # only for Cloudflare Pages demos
 ```
 
-Set these once (PowerShell: `$env:NAME = "value"`; macOS/Linux: `export NAME=value`):
+Put these in a private env file (`chmod 600`) and load it with `set -a; source ~/.roofin.env; set +a`:
 
 | Variable | What | Cost |
 |---|---|---|
 | `ROOFIN_SENDER_NAME`, `ROOFIN_SENDER_EMAIL` | You | — |
 | `ROOFIN_SENDER_ADDRESS` | A real postal address (US law for commercial email; a PO box works) | — |
 | `SERPAPI_KEY` | Google Maps data incl. ratings & reviews. Free plan, 250 searches/month, no card | $0 |
-| `ROOFIN_SMTP_USER`, `ROOFIN_SMTP_PASSWORD` | Your Gmail + an [App Password](https://myaccount.google.com/apppasswords) (needs 2-step verification) | $0 |
-| `ROOFIN_PAY_LINK` | Your PayPal.me (or other) link, put in emails | $0 until paid |
-| `ROOFIN_PROCESSOR` | `paypal` (default), `stripe`, `venmo`, `cashapp`, `zelle`, which sets the fees | — |
+| `ROOFIN_TELEGRAM_TOKEN`, `ROOFIN_TELEGRAM_CHAT_ID` | Your bot: Telegram → @BotFather → `/newbot`; message the bot, then `roofin telegram-setup` prints the chat id | $0 |
+| `STRIPE_SECRET_KEY` | Restricted key: write Products/Prices/Payment Links, read Checkout Sessions/Payment Intents/Charges/Balance transactions. `rk_test_…` to try with fake cards | fee only when paid |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `ROOFIN_CF_PROJECT` | Demo hosting on Cloudflare Pages: unlimited static bandwidth, 500 deploys/month. Token template "Edit Cloudflare Pages"; project name becomes `https://<name>.pages.dev` | $0 |
+| `ROOFIN_SMTP_USER`, `ROOFIN_SMTP_PASSWORD` | Optional auto-email: your Gmail + an [App Password](https://myaccount.google.com/apppasswords). Leave unset to send everything yourself from the Telegram cards | $0 |
+| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` | Alternative demo host (about 20 deploys/month free; the site pauses if credits run out) | $0 |
+| `ROOFIN_PAY_LINK` | Fallback pay link (PayPal.me) if you don't use Stripe | $0 until paid |
 
-No `SERPAPI_KEY`? Discovery falls back to OpenStreetMap (free, no account, fewer businesses, no reviews).
-No mail settings? The loop still drafts everything; you send by hand.
+Everything is optional except the sender lines: without SerpApi it uses OpenStreetMap, without a demo host the
+demo is sent to your Telegram as a file, without Stripe it uses `ROOFIN_PAY_LINK`.
 
-**SerpApi budget:** a market search costs 3 calls (60 businesses), reviews cost 1 call each and are fetched
-only for the top 10 new prospects. Roughly 13 calls per new market, so about 15 markets/month on the free
-plan. roofin counts calls and stops at 250 (`ROOFIN_SERPAPI_MONTHLY` to change). At the limit, SerpApi
-refuses instead of billing, because the free plan has no card on file.
+**Free-tier budgets** are counted locally and never exceeded: SerpApi 250 calls/month (a new market is about
+13), Cloudflare 450 deploys/month (one per run at most, and only if something changed), Netlify 15 deploys/month.
+At their limits these services refuse instead of billing.
 
 ## Money: never spend a dime you didn't earn
 
 ```bash
-roofin price                       # Charge $6 via paypal (3.49% + $0.49 fee = $0.70) → you keep $5.30
+roofin price                       # with Stripe: Charge $6 (2.9% + $0.30 = $0.48) → you keep $5.52
+roofin price --processor paypal    # Charge $6 via paypal (3.49% + $0.49 fee = $0.70) → you keep $5.30
 roofin price --processor zelle     # Charge $5 → you keep $5.00
-roofin paid 3 6                    # records the payment and its fee
+roofin paid 3 6                    # record a non-Stripe payment (Stripe ones are recorded automatically)
 roofin expense "SerpApi upgrade" 4 # allowed only if earnings cover it; otherwise refused
 roofin stats
 ```
@@ -118,6 +127,10 @@ roofin outreach / --show 3         # list / read one (and their reply)
 roofin send [--dry-run]            # just the sending step
 roofin inbox                       # just the reply-reading step
 roofin calls                       # phone-only prospects, script + WhatsApp link
+roofin notify                      # send pending prospects to Telegram
+roofin publish                     # push new demos live
+roofin payments                    # check Stripe now
+roofin telegram-setup              # find your chat id, send a test message
 roofin mark 3 approved|sent|replied|won|lost|opted_out
 ```
 
@@ -140,7 +153,8 @@ flagged, and then nothing you send lands. 10–15 a day of specific, personal em
 
 ## Roadmap
 
-* **Done:** find → audit → report → send → replies/opt-outs → follow-up → payments & expense guard.
+* **Done:** find → audit → all contacts → demo + pay link → send / Telegram hand-off → replies/opt-outs →
+  follow-up → Stripe payments → expense guard.
 * **Next:** after written authorization, apply fixes to the client's site; monthly re-audit billed as a
   subscription ($49–$199/month).
 
@@ -156,6 +170,11 @@ removal, concrete, pressure washing, auto detailing — same engine, new word li
 roofin/
   discovery.py   OpenStreetMap (free) / Google Places (paid) / CSV import
   serp.py        SerpApi Google Maps + reviews (free plan), with a monthly call budget
+  telegram.py    your bot: messages and files to you
+  cards.py       the copy-paste Telegram card per prospect, reply cards
+  cloudflare.py  demo pages on Cloudflare Pages (via wrangler)
+  netlify.py     demo pages on Netlify (file-digest API)
+  stripe_pay.py  payment link per prospect, payment detection
   crawl.py       polite shallow crawl (robots.txt, priority links)
   facts.py       HTML → facts (forms, tel links, CTAs, emails, viewport, nav…)
   detect.py      findings, competitor leaders, prospect score
